@@ -40,41 +40,72 @@ function saveServers(servers: Server[]): void {
 
 // ─── SSH ────────────────────────────────────────────────────────────────────
 
-function hasSshpass(): boolean {
-	return spawnSync("which", ["sshpass"]).status === 0;
+const IS_WINDOWS = process.platform === "win32";
+
+function hasCommand(cmd: string): boolean {
+	const finder = IS_WINDOWS ? "where" : "which";
+	return spawnSync(finder, [cmd], { shell: IS_WINDOWS }).status === 0;
 }
 
 async function connect(server: Server): Promise<void> {
-	if (!hasSshpass()) {
-		console.error(
-			"\n  \x1b[31merror:\x1b[0m sshpass not found — install it with: sudo apt install sshpass\n",
+	let child;
+
+	if (IS_WINDOWS) {
+		// On Windows use plink (PuTTY) which supports -pw
+		if (!hasCommand("plink")) {
+			console.error(
+				"\n  \x1b[31merror:\x1b[0m plink not found.\n" +
+				"  Install PuTTY from https://www.putty.org/ and make sure plink.exe is in your PATH.\n",
+			);
+			process.exit(1);
+		}
+
+		console.log(
+			`\n  \x1b[36mConnecting to\x1b[0m \x1b[1m${server.alias}\x1b[0m` +
+				`  \x1b[2m${server.user}@${server.host}:${server.port}\x1b[0m\n`,
 		);
-		process.exit(1);
+
+		child = spawn(
+			"plink",
+			[
+				"-ssh",
+				"-pw", server.password,
+				"-P", String(server.port),
+				`${server.user}@${server.host}`,
+			],
+			{ stdio: "inherit", shell: false },
+		);
+	} else {
+		// On Linux/macOS use sshpass
+		if (!hasCommand("sshpass")) {
+			console.error(
+				"\n  \x1b[31merror:\x1b[0m sshpass not found — install it with: sudo apt install sshpass\n",
+			);
+			process.exit(1);
+		}
+
+		console.log(
+			`\n  \x1b[36mConnecting to\x1b[0m \x1b[1m${server.alias}\x1b[0m` +
+				`  \x1b[2m${server.user}@${server.host}:${server.port}\x1b[0m\n`,
+		);
+
+		child = spawn(
+			"sshpass",
+			[
+				"-p", server.password,
+				"ssh",
+				"-p", String(server.port),
+				"-o", "StrictHostKeyChecking=no",
+				"-o", "ConnectTimeout=10",
+				`${server.user}@${server.host}`,
+			],
+			{ stdio: "inherit" },
+		);
 	}
 
-	console.log(
-		`\n  \x1b[36mConnecting to\x1b[0m \x1b[1m${server.alias}\x1b[0m` +
-			`  \x1b[2m${server.user}@${server.host}:${server.port}\x1b[0m\n`,
-	);
-
-	const child = spawn(
-		"sshpass",
-		[
-			"-p",
-			server.password,
-			"ssh",
-			"-p",
-			String(server.port),
-			"-o",
-			"StrictHostKeyChecking=no",
-			"-o",
-			"ConnectTimeout=10",
-			`${server.user}@${server.host}`,
-		],
-		{ stdio: "inherit" },
-	);
-	child.unref();
-	process.exit(0);
+	await new Promise<void>((resolve) => {
+		child.on("close", () => resolve());
+	});
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
