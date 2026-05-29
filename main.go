@@ -265,14 +265,30 @@ func (m MainModel) updateServerList(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case "up", "k":
+		case "left", "h":
 			if m.selectedIdx > 0 {
 				m.selectedIdx--
 			}
 
-		case "down", "j":
+		case "right", "l":
 			if m.selectedIdx < len(m.servers)-1 {
 				m.selectedIdx++
+			}
+
+		case "up", "k":
+			numCols := m.getGridCols()
+			if m.selectedIdx >= numCols {
+				m.selectedIdx -= numCols
+			} else {
+				m.selectedIdx = 0
+			}
+
+		case "down", "j":
+			numCols := m.getGridCols()
+			if m.selectedIdx+numCols < len(m.servers) {
+				m.selectedIdx += numCols
+			} else if m.selectedIdx < len(m.servers)-1 {
+				m.selectedIdx = len(m.servers) - 1
 			}
 
 		case "enter", "c", "u":
@@ -871,30 +887,55 @@ func (m MainModel) viewServerList() string {
 		return b.String()
 	}
 
+	var cards []string
 	for i, s := range m.servers {
 		var cardContent strings.Builder
 
-		// Determine if server is matching the current folder
+		// Determine if server matches the current folder and calculate space for alias
 		matchTag := ""
+		aliasSpace := 34
 		if s.ProjectPath != "" && s.ProjectPath == m.cwd {
-			matchTag = styleStatusMsg.Render(" [CURRENT PROJECT]")
+			matchTag = " [CURRENT PROJECT]"
+			aliasSpace = 34 - len(matchTag)
 		}
 
-		cardContent.WriteString(fmt.Sprintf("%s%s\n", styleServerAlias.Render(s.Alias), matchTag))
-		cardContent.WriteString(styleServerDetails.Render(fmt.Sprintf("SSH: %s@%s:%d\n", s.User, s.Host, s.Port)))
+		truncatedAlias := truncateMiddle(s.Alias, aliasSpace)
+		cardContent.WriteString(fmt.Sprintf("%s%s\n", styleServerAlias.Render(truncatedAlias), styleStatusMsg.Render(matchTag)))
+
+		sshInfo := fmt.Sprintf("%s@%s:%d", s.User, s.Host, s.Port)
+		truncatedSSHInfo := truncateMiddle(sshInfo, 29)
+		cardContent.WriteString(styleServerDetails.Render("SSH: " + truncatedSSHInfo + "\n"))
+
 		if s.ProjectPath != "" {
-			cardContent.WriteString(styleServerDetails.Render("Path: "))
-			cardContent.WriteString(styleProjectPath.Render(s.ProjectPath))
+			truncatedPath := truncateMiddle(s.ProjectPath, 28)
+			cardContent.WriteString(styleServerDetails.Render("Path: ") + styleProjectPath.Render(truncatedPath))
 		} else {
 			cardContent.WriteString(styleServerDetails.Render("Path: (none)"))
 		}
 
+		var renderedCard string
 		if i == m.selectedIdx {
-			b.WriteString(styleServerCardSelected.Render(cardContent.String()))
+			renderedCard = styleServerCardSelected.Render(cardContent.String())
 		} else {
-			b.WriteString(styleServerCard.Render(cardContent.String()))
+			renderedCard = styleServerCard.Render(cardContent.String())
 		}
+		cards = append(cards, renderedCard)
 	}
+
+	// Layout in a grid/columns
+	numCols := m.getGridCols()
+	var rows []string
+	for i := 0; i < len(cards); i += numCols {
+		end := i + numCols
+		if end > len(cards) {
+			end = len(cards)
+		}
+		row := lipgloss.JoinHorizontal(lipgloss.Top, cards[i:end]...)
+		rows = append(rows, row)
+	}
+	grid := lipgloss.JoinVertical(lipgloss.Left, rows...)
+	b.WriteString(grid)
+	b.WriteString("\n")
 
 	if m.confirmDelete {
 		b.WriteString(styleErrorMsg.Render("\nConfirm deletion of selected server? [y/N]: "))
@@ -1323,4 +1364,25 @@ func (m *MainModel) handleTerminalResize() {
 	if b.terminalSession != nil {
 		_ = b.terminalSession.WindowChange(termHeight, termWidth)
 	}
+}
+
+func (m MainModel) getGridCols() int {
+	cardWidth := 38
+	cardGap := 2
+	numCols := m.width / (cardWidth + cardGap)
+	if numCols <= 0 {
+		return 1
+	}
+	return numCols
+}
+
+func truncateMiddle(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 5 {
+		return "..."
+	}
+	half := (maxLen - 3) / 2
+	return s[:half] + "..." + s[len(s)-half:]
 }

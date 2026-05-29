@@ -34,12 +34,18 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorOverlay).
 			Padding(0, 1).
+			Width(38).
+			Height(5).
+			MarginLeft(2).
 			MarginBottom(1)
 
 	styleServerCardSelected = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(colorPurple).
 				Padding(0, 1).
+				Width(38).
+				Height(5).
+				MarginLeft(2).
 				MarginBottom(1)
 
 	styleServerAlias = lipgloss.NewStyle().
