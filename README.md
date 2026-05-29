@@ -15,6 +15,9 @@ A secure, blazing-fast, and beautiful **Terminal User Interface (TUI)** dashboar
 *   **🔒 Secure Credentials Store**: Host credentials, usernames, and passwords are encrypted using **AES-256-GCM**. Encryption keys are generated locally with restricted `0600` permissions.
 *   **🖥️ Dual-Pane SFTP File Browser**: A classic split-pane interface (Local on the left, Remote on the right) allowing seamless navigation, directory traversal, and operations.
 *   **⚡ Integrated PTY Terminal**: Run a live, interactive SSH terminal pane below your file browser. Toggle focus on the fly using `Ctrl+T`.
+*   **📐 Dynamic Panel Resizing**: Resize TUI layout ratios dynamically! Adjust file panel split widths and terminal height partition splits via intuitive hotkeys.
+*   **🖱️ Mouse Interaction Support**: Click on panels directly to change focus, and use the scroll wheel to navigate file listings seamlessly.
+*   **🎯 High-Visibility Block Cursor**: Features a custom, high-contrast, non-blinking block cursor inside the focused terminal panel to track input insertion points.
 *   **📊 Centered Overlay Modals**: Progress bars, loader indicators, connection states, and safety confirmation prompts appear as elegant, centered modal dialogs.
 *   **🔄 Robust Async File Transfers**: Upload/download files and entire directory structures asynchronously. Features recursive symlink handling, infinite loop safety, and global 100ms update rate-limiting to prevent TUI stuttering.
 *   **🗑️ Integrated File Operations**: Delete files or folders safely on either the local filesystem or the remote server, backed by a confirmation prompt.
@@ -106,6 +109,9 @@ Toggle active panel focus between the **File Browser (Top)** and the **SSH Termi
 |:---|:---|
 | `tab` / `←` / `→` | Switch active panel between **Local (Left)** and **Remote (Right)** |
 | `↑` / `↓` or `k` / `j` | Browse file and directory list |
+| `+` / `-` / `[` / `]` | Resize file panel width partition splits |
+| `ctrl+left arrow` / `ctrl+right arrow` | Resize file panel width partition splits |
+| `ctrl+up arrow` / `ctrl+down arrow` | Adjust vertical split height (makes files panels taller/shorter) |
 | `enter` | Open/Enter directory (or go up via `..` parent link) |
 | `backspace` | Go up to parent directory |
 | `u` | Upload selected item from Local to Remote |
@@ -117,6 +123,7 @@ Toggle active panel focus between the **File Browser (Top)** and the **SSH Termi
 | Key | Action |
 |:---|:---|
 | `Type directly` | Send keystrokes directly to the remote shell session |
+| `ctrl+up arrow` / `ctrl+down arrow` | Adjust terminal split height (makes terminal taller/shorter) |
 | `Ctrl+C` | Send interrupt signal (SIGINT) to the remote process |
 | `Ctrl+D` | Close remote terminal session (EOF) |
 | `Ctrl+T` | Toggle focus back to file panels |
@@ -145,7 +152,3 @@ Contributions, bug reports, and pull requests are welcome!
 5. Open a Pull Request.
 
 ---
-
-## 📄 License
-
-Distributed under the MIT License. See [LICENSE](LICENSE) for more information.

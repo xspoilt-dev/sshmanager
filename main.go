@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	uv "github.com/charmbracelet/ultraviolet"
 )
 
 type AppState int
@@ -107,29 +109,7 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == StateSFTPBrowser && m.sftpBrowser != nil {
 			m.sftpBrowser.width = msg.Width
 			m.sftpBrowser.height = msg.Height
-
-			availHeight := msg.Height - 6
-			if availHeight < 10 {
-				availHeight = 10
-			}
-			termHeight := availHeight * 35 / 100
-			if termHeight < 6 {
-				termHeight = 6
-			}
-			if termHeight > 15 {
-				termHeight = 15
-			}
-			termWidth := msg.Width - 4
-			if termWidth < 20 {
-				termWidth = 20
-			}
-
-			if m.sftpBrowser.terminalEmu != nil {
-				m.sftpBrowser.terminalEmu.Resize(termWidth, termHeight)
-			}
-			if m.sftpBrowser.terminalSession != nil {
-				m.sftpBrowser.terminalSession.WindowChange(termHeight, termWidth)
-			}
+			m.handleTerminalResize()
 		}
 		return m, nil
 
@@ -417,6 +397,66 @@ func (m MainModel) updateSFTPBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		if b.isBusy || b.deleteConfirm {
+			return m, nil
+		}
+
+		// Click to focus panels
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			availHeight := m.height - 8
+			if availHeight < 10 {
+				availHeight = 10
+			}
+			termHeight := availHeight * b.terminalHeightPct / 100
+			if termHeight < 5 {
+				termHeight = 5
+			}
+			if termHeight > availHeight-6 {
+				termHeight = availHeight - 6
+			}
+			panelHeight := availHeight - termHeight
+			if panelHeight < 6 {
+				panelHeight = 6
+			}
+
+			// File panels start around row 5 and have height panelHeight
+			terminalStartRow := 5 + panelHeight + 2
+			if msg.Y >= terminalStartRow {
+				b.activePanel = TerminalPanel
+			} else if msg.X < m.width/2 {
+				b.activePanel = LocalPanel
+			} else {
+				b.activePanel = RemotePanel
+			}
+			return m, nil
+		}
+
+		// Mouse scroll
+		if msg.Button == tea.MouseButtonWheelUp {
+			if b.activePanel == LocalPanel {
+				if b.localIdx > 0 {
+					b.localIdx--
+				}
+			} else if b.activePanel == RemotePanel {
+				if b.remoteIdx > 0 {
+					b.remoteIdx--
+				}
+			}
+			return m, nil
+		} else if msg.Button == tea.MouseButtonWheelDown {
+			if b.activePanel == LocalPanel {
+				if b.localIdx < len(b.localItems)-1 {
+					b.localIdx++
+				}
+			} else if b.activePanel == RemotePanel {
+				if b.remoteIdx < len(b.remoteItems)-1 {
+					b.remoteIdx++
+				}
+			}
+			return m, nil
+		}
+
 	case tea.KeyMsg:
 		// Clear transfer status notifications on keypress
 		if !b.isBusy && b.activePanel != TerminalPanel {
@@ -459,6 +499,48 @@ func (m MainModel) updateSFTPBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Global resize key bindings (available even in terminal panel via ctrl+up/down)
+		switch msg.String() {
+		case "ctrl+up":
+			if b.activePanel == TerminalPanel {
+				if b.terminalHeightPct < 80 {
+					b.terminalHeightPct += 5
+					m.handleTerminalResize()
+				}
+			} else {
+				// Make file panels taller -> make terminal shorter
+				if b.terminalHeightPct > 15 {
+					b.terminalHeightPct -= 5
+					m.handleTerminalResize()
+				}
+			}
+			return m, nil
+		case "ctrl+down":
+			if b.activePanel == TerminalPanel {
+				if b.terminalHeightPct > 15 {
+					b.terminalHeightPct -= 5
+					m.handleTerminalResize()
+				}
+			} else {
+				// Make file panels shorter -> make terminal taller
+				if b.terminalHeightPct < 80 {
+					b.terminalHeightPct += 5
+					m.handleTerminalResize()
+				}
+			}
+			return m, nil
+		case "ctrl+right":
+			if b.localWidthPct < 80 {
+				b.localWidthPct += 5
+			}
+			return m, nil
+		case "ctrl+left":
+			if b.localWidthPct > 20 {
+				b.localWidthPct -= 5
+			}
+			return m, nil
+		}
+
 		if b.activePanel == TerminalPanel {
 			if msg.Type == tea.KeyCtrlT {
 				b.activePanel = LocalPanel
@@ -489,6 +571,30 @@ func (m MainModel) updateSFTPBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
+		case "+", "=", "]":
+			if b.activePanel == LocalPanel {
+				if b.localWidthPct < 80 {
+					b.localWidthPct += 5
+				}
+			} else if b.activePanel == RemotePanel {
+				if b.localWidthPct > 20 {
+					b.localWidthPct -= 5
+				}
+			}
+			return m, nil
+
+		case "-", "[":
+			if b.activePanel == LocalPanel {
+				if b.localWidthPct > 20 {
+					b.localWidthPct -= 5
+				}
+			} else if b.activePanel == RemotePanel {
+				if b.localWidthPct < 80 {
+					b.localWidthPct += 5
+				}
+			}
+			return m, nil
+
 		case "q", "esc":
 			if b.sftpClient != nil {
 				b.sftpClient.Close()
@@ -692,7 +798,7 @@ func (m MainModel) View() string {
 func (m MainModel) renderDeleteConfirmModal(b *SFTPBrowser) string {
 	content := fmt.Sprintf(
 		"%s\n\n%s\n%s\n\n%s",
-		styleModalTitle.Render("⚠️ CONFIRM DELETE"),
+		styleModalTitle.Render("■ CONFIRM DELETE"),
 		styleModalProgressMsg.Render("Are you sure you want to permanently delete:"),
 		lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render(b.deleteItem.Name),
 		lipgloss.NewStyle().Foreground(colorMuted).Render("[y] Yes, Delete      [n/esc] Cancel"),
@@ -702,27 +808,27 @@ func (m MainModel) renderDeleteConfirmModal(b *SFTPBrowser) string {
 }
 
 func (m MainModel) renderProgressModal(b *SFTPBrowser) string {
-	title := "⚙️ SYSTEM BUSY"
+	title := "■ SYSTEM BUSY"
 	msg := b.statusMsg
 	var progressView string
 
 	if strings.HasPrefix(b.statusMsg, "Connecting") {
-		title = "⚡ CONNECTING TO VPS"
+		title = "■ CONNECTING TO VPS"
 		msg = fmt.Sprintf("Establishing connection to %s...\nPlease wait.", b.Server.Alias)
 		progressView = fmt.Sprintf("\n%s\n", b.spinner.View())
 	} else if strings.HasPrefix(b.statusMsg, "Reading") {
-		title = "📂 READING DIRECTORY"
+		title = "■ READING DIRECTORY"
 		msg = fmt.Sprintf("Fetching remote file list...\nPath: %s", b.remoteDir)
 		progressView = fmt.Sprintf("\n%s\n", b.spinner.View())
 	} else if strings.HasPrefix(b.statusMsg, "Deleting") {
-		title = "🗑️ DELETING ITEM"
+		title = "■ DELETING ITEM"
 		progressView = fmt.Sprintf("\n%s\n", b.spinner.View())
 	} else if strings.HasPrefix(b.statusMsg, "Uploading") {
-		title = "📤 UPLOADING FILE(S)"
+		title = "■ UPLOADING FILE(S)"
 		bar := drawProgressBar(b.lastProgress.Percent, 44)
 		progressView = fmt.Sprintf("\n%s  %.1f%%\n", lipgloss.NewStyle().Foreground(colorPurple).Render(bar), b.lastProgress.Percent*100)
 	} else if strings.HasPrefix(b.statusMsg, "Downloading") {
-		title = "📥 DOWNLOADING FILE(S)"
+		title = "■ DOWNLOADING FILE(S)"
 		bar := drawProgressBar(b.lastProgress.Percent, 44)
 		progressView = fmt.Sprintf("\n%s  %.1f%%\n", lipgloss.NewStyle().Foreground(colorPurple).Render(bar), b.lastProgress.Percent*100)
 	} else {
@@ -866,26 +972,36 @@ func (m MainModel) viewSFTPBrowser() string {
 	if availHeight < 10 {
 		availHeight = 10
 	}
-	termHeight := availHeight * 35 / 100
+	termHeight := availHeight * b.terminalHeightPct / 100
 	if termHeight < 5 {
 		termHeight = 5
 	}
-	if termHeight > 12 {
-		termHeight = 12
+	if termHeight > availHeight-6 {
+		termHeight = availHeight - 6
 	}
 	panelHeight := availHeight - termHeight
 	if panelHeight < 6 {
 		panelHeight = 6
 	}
 
-	panelWidth := (m.width - 10) / 2
-	if panelWidth < 20 {
-		panelWidth = 20
+	// Calculate panel widths based on localWidthPct
+	availWidth := m.width - 10
+	if availWidth < 40 {
+		availWidth = 40
+	}
+	leftPanelWidth := availWidth * b.localWidthPct / 100
+	rightPanelWidth := availWidth - leftPanelWidth
+
+	if leftPanelWidth < 20 {
+		leftPanelWidth = 20
+	}
+	if rightPanelWidth < 20 {
+		rightPanelWidth = 20
 	}
 
 	// Render Local Panel
 	var localLines []string
-	localLines = append(localLines, lipgloss.NewStyle().Bold(true).Foreground(colorPurple).Render("💻 LOCAL DIRECTORY:"))
+	localLines = append(localLines, lipgloss.NewStyle().Bold(true).Foreground(colorPurple).Render("■ LOCAL DIRECTORY:"))
 	localLines = append(localLines, styleServerDetails.Render(b.localDir))
 	localLines = append(localLines, "")
 
@@ -896,15 +1012,15 @@ func (m MainModel) viewSFTPBrowser() string {
 	}
 
 	localView := lipgloss.JoinVertical(lipgloss.Left, localLines...)
-	leftStyle := styleFilePanel.Copy().Width(panelWidth).Height(panelHeight)
+	leftStyle := styleFilePanel.Copy().Width(leftPanelWidth).Height(panelHeight)
 	if b.activePanel == LocalPanel {
-		leftStyle = styleFilePanelActive.Copy().Width(panelWidth).Height(panelHeight)
+		leftStyle = styleFilePanelActive.Copy().Width(leftPanelWidth).Height(panelHeight)
 	}
 	leftPanel := leftStyle.Render(localView)
 
 	// Render Remote Panel
 	var remoteLines []string
-	remoteLines = append(remoteLines, lipgloss.NewStyle().Bold(true).Foreground(colorBlue).Render("☁ REMOTE VPS DIRECTORY:"))
+	remoteLines = append(remoteLines, lipgloss.NewStyle().Bold(true).Foreground(colorBlue).Render("■ REMOTE VPS DIRECTORY:"))
 	remoteLines = append(remoteLines, styleServerDetails.Render(b.remoteDir))
 	remoteLines = append(remoteLines, "")
 
@@ -915,9 +1031,9 @@ func (m MainModel) viewSFTPBrowser() string {
 	}
 
 	remoteView := lipgloss.JoinVertical(lipgloss.Left, remoteLines...)
-	rightStyle := styleFilePanel.Copy().Width(panelWidth).Height(panelHeight)
+	rightStyle := styleFilePanel.Copy().Width(rightPanelWidth).Height(panelHeight)
 	if b.activePanel == RemotePanel {
-		rightStyle = styleFilePanelActive.Copy().Width(panelWidth).Height(panelHeight)
+		rightStyle = styleFilePanelActive.Copy().Width(rightPanelWidth).Height(panelHeight)
 	}
 	rightPanel := rightStyle.Render(remoteView)
 
@@ -928,7 +1044,40 @@ func (m MainModel) viewSFTPBrowser() string {
 	// Render Terminal Panel
 	var termContent string
 	if b.terminalEmu != nil {
-		termContent = b.terminalEmu.Render()
+		if b.activePanel == TerminalPanel {
+			pos := b.terminalEmu.CursorPosition()
+			w, h := b.terminalEmu.Width(), b.terminalEmu.Height()
+			if pos.X >= 0 && pos.X < w && pos.Y >= 0 && pos.Y < h {
+				oldCell := b.terminalEmu.CellAt(pos.X, pos.Y)
+				var oldCellClone *uv.Cell
+				if oldCell != nil {
+					oldCellClone = oldCell.Clone()
+				}
+
+				// Create block cursor style
+				cursorCell := &uv.Cell{
+					Content: " ",
+					Width:   1,
+				}
+				if oldCell != nil {
+					if oldCell.Content != "" {
+						cursorCell.Content = oldCell.Content
+					}
+					cursorCell.Style = oldCell.Style
+				}
+				cursorCell.Style.Bg = color.RGBA{R: 203, G: 166, B: 247, A: 255}
+				cursorCell.Style.Fg = color.RGBA{R: 0, G: 0, B: 0, A: 255}
+				cursorCell.Style.Attrs &^= uv.AttrReverse
+
+				b.terminalEmu.SetCell(pos.X, pos.Y, cursorCell)
+				termContent = b.terminalEmu.Render()
+				b.terminalEmu.SetCell(pos.X, pos.Y, oldCellClone)
+			} else {
+				termContent = b.terminalEmu.Render()
+			}
+		} else {
+			termContent = b.terminalEmu.Render()
+		}
 	} else {
 		termContent = "Initializing remote terminal session..."
 	}
@@ -953,9 +1102,9 @@ func (m MainModel) viewSFTPBrowser() string {
 
 	var helpText string
 	if b.activePanel == TerminalPanel {
-		helpText = "ctrl+t: focus files • commands: type directly • ctrl+c: interrupt • ctrl+d: close session • q/esc: disconnect & exit"
+		helpText = "ctrl+t: focus files • ctrl+up/down: resize height • ctrl+c: interrupt • ctrl+d: close • q/esc: disconnect & exit"
 	} else {
-		helpText = "tab/left/right: switch panel • ctrl+t: focus terminal • up/down: select • enter: open • backspace: up • u: upload • d: download • x/del: delete • q/esc: exit"
+		helpText = "tab/←/→: switch panel • ctrl+t: focus term • +/-/[]: resize • up/down: select • enter: open • backspace: up • u: upload • d: download • x/del: delete • q/esc: exit"
 	}
 	builder.WriteString(styleHelp.Render(helpText))
 
@@ -1045,7 +1194,7 @@ func main() {
 		height:      24,
 	}
 
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Alas, terminal application failed: %v\n", err)
 		os.Exit(1)
@@ -1146,4 +1295,32 @@ func keyMsgToTerminalInput(msg tea.KeyMsg) string {
 		return "\x1a"
 	}
 	return ""
+}
+
+func (m *MainModel) handleTerminalResize() {
+	b := m.sftpBrowser
+	if b == nil {
+		return
+	}
+	availHeight := m.height - 8
+	if availHeight < 10 {
+		availHeight = 10
+	}
+	termHeight := availHeight * b.terminalHeightPct / 100
+	if termHeight < 5 {
+		termHeight = 5
+	}
+	if termHeight > availHeight-6 {
+		termHeight = availHeight - 6
+	}
+	termWidth := m.width - 8
+	if termWidth < 20 {
+		termWidth = 20
+	}
+	if b.terminalEmu != nil {
+		b.terminalEmu.Resize(termWidth, termHeight)
+	}
+	if b.terminalSession != nil {
+		_ = b.terminalSession.WindowChange(termHeight, termWidth)
+	}
 }

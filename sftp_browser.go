@@ -64,6 +64,9 @@ type SFTPBrowser struct {
 	deleteConfirm bool
 	deleteItem    FileItem
 	deletePath    string
+
+	terminalHeightPct int
+	localWidthPct     int
 }
 
 // Msg types for SFTP
@@ -689,11 +692,13 @@ func NewSFTPBrowser(server Server) *SFTPBrowser {
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	return &SFTPBrowser{
-		Server:      server,
-		activePanel: LocalPanel,
-		spinner:     s,
-		isBusy:      true,
-		statusMsg:   "Connecting via SFTP...",
+		Server:            server,
+		activePanel:       LocalPanel,
+		spinner:           s,
+		isBusy:            true,
+		statusMsg:         "Connecting via SFTP...",
+		terminalHeightPct: 35,
+		localWidthPct:     50,
 	}
 }
 
