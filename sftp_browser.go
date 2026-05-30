@@ -1,12 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -319,58 +322,201 @@ func countRemoteFiles(client *sftp.Client, path string) (int64, error) {
 	return totalSize, nil
 }
 
-func uploadItemWithProgress(client *sftp.Client, localPath, remotePath string, bytesCopied *int64, lastUpdate *time.Time, totalBytes int64, ch chan sftpProgressMsg, rootName string) error {
+type fileTransferTask struct {
+	LocalPath     string
+	RemotePath    string
+	Size          int64
+	IsSymlink     bool
+	SymlinkTarget string
+}
+
+func discoverUploadTasks(client *sftp.Client, localPath, remotePath string) ([]fileTransferTask, error) {
 	info, err := os.Lstat(localPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if info.Mode()&os.ModeSymlink != 0 {
 		target, err := os.Readlink(localPath)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		_ = client.Remove(remotePath)
-		return client.Symlink(target, remotePath)
+		return []fileTransferTask{{
+			LocalPath:     localPath,
+			RemotePath:    remotePath,
+			Size:          0,
+			IsSymlink:     true,
+			SymlinkTarget: target,
+		}}, nil
 	}
 
 	if info.IsDir() {
 		if stat, err := client.Stat(remotePath); err == nil {
 			if !stat.IsDir() {
-				return fmt.Errorf("remote path %s exists but is not a directory", remotePath)
+				return nil, fmt.Errorf("remote path %s exists but is not a directory", remotePath)
 			}
 		} else {
 			err = client.Mkdir(remotePath)
 			if err != nil {
 				if !strings.Contains(err.Error(), "already exists") && !strings.Contains(err.Error(), "Failure") {
-					return err
+					return nil, err
 				}
 			}
 		}
 
 		entries, err := os.ReadDir(localPath)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
+		var tasks []fileTransferTask
 		for _, entry := range entries {
 			subLocal := filepath.Join(localPath, entry.Name())
 			subRemote := remoteJoin(remotePath, entry.Name())
-			if err := uploadItemWithProgress(client, subLocal, subRemote, bytesCopied, lastUpdate, totalBytes, ch, rootName); err != nil {
-				return err
+			subTasks, err := discoverUploadTasks(client, subLocal, subRemote)
+			if err != nil {
+				return nil, err
 			}
+			tasks = append(tasks, subTasks...)
 		}
-		return nil
+		return tasks, nil
 	}
 
-	// File upload
-	src, err := os.Open(localPath)
+	return []fileTransferTask{{
+		LocalPath:  localPath,
+		RemotePath: remotePath,
+		Size:       info.Size(),
+	}}, nil
+}
+
+func discoverDownloadTasks(client *sftp.Client, remotePath, localPath string) ([]fileTransferTask, error) {
+	info, err := client.Lstat(remotePath)
+	if err != nil {
+		return nil, err
+	}
+
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := client.ReadLink(remotePath)
+		if err != nil {
+			return nil, err
+		}
+		return []fileTransferTask{{
+			LocalPath:     localPath,
+			RemotePath:    remotePath,
+			Size:          0,
+			IsSymlink:     true,
+			SymlinkTarget: target,
+		}}, nil
+	}
+
+	if info.IsDir() {
+		err = os.MkdirAll(localPath, 0755)
+		if err != nil {
+			return nil, err
+		}
+
+		entries, err := client.ReadDir(remotePath)
+		if err != nil {
+			return nil, err
+		}
+
+		var tasks []fileTransferTask
+		for _, entry := range entries {
+			name := entry.Name()
+			if name == "." || name == ".." {
+				continue
+			}
+			subRemote := remoteJoin(remotePath, name)
+			subLocal := filepath.Join(localPath, name)
+			subTasks, err := discoverDownloadTasks(client, subRemote, subLocal)
+			if err != nil {
+				return nil, err
+			}
+			tasks = append(tasks, subTasks...)
+		}
+		return tasks, nil
+	}
+
+	return []fileTransferTask{{
+		LocalPath:  localPath,
+		RemotePath: remotePath,
+		Size:       info.Size(),
+	}}, nil
+}
+
+func getLocalSHA256(localPath string) (string, error) {
+	f, err := os.Open(localPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func getRemoteSHA256(sshClient *ssh.Client, remotePath string) (string, error) {
+	if sshClient == nil {
+		return "", fmt.Errorf("ssh client not available")
+	}
+	session, err := sshClient.NewSession()
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+
+	escapedPath := strings.ReplaceAll(remotePath, "'", "'\\''")
+	cmd := fmt.Sprintf("sha256sum '%s'", escapedPath)
+
+	output, err := session.Output(cmd)
+	if err != nil {
+		// Fallback to shasum if sha256sum doesn't exist
+		session2, err2 := sshClient.NewSession()
+		if err2 != nil {
+			return "", err
+		}
+		defer session2.Close()
+		cmd = fmt.Sprintf("shasum -a 256 '%s'", escapedPath)
+		output, err = session2.Output(cmd)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	fields := strings.Fields(string(output))
+	if len(fields) < 1 {
+		return "", fmt.Errorf("invalid sha256sum output: %s", string(output))
+	}
+	return fields[0], nil
+}
+
+func uploadSingleTask(sshClient *ssh.Client, sftpClient *sftp.Client, task fileTransferTask, sendProgress func(int64)) error {
+	if task.IsSymlink {
+		_ = sftpClient.Remove(task.RemotePath)
+		err := sftpClient.Symlink(task.SymlinkTarget, task.RemotePath)
+		sendProgress(0)
+		return err
+	}
+
+	localHash, err := getLocalSHA256(task.LocalPath)
+	if err == nil {
+		remoteHash, err := getRemoteSHA256(sshClient, task.RemotePath)
+		if err == nil && localHash == remoteHash {
+			sendProgress(task.Size)
+			return nil
+		}
+	}
+
+	src, err := os.Open(task.LocalPath)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
 
-	dest, err := client.Create(remotePath)
+	dest, err := sftpClient.Create(task.RemotePath)
 	if err != nil {
 		return err
 	}
@@ -379,23 +525,7 @@ func uploadItemWithProgress(client *sftp.Client, localPath, remotePath string, b
 	pr := &progressReader{
 		r: src,
 		onProgress: func(n int) {
-			*bytesCopied += int64(n)
-			if time.Since(*lastUpdate) > 100*time.Millisecond || *bytesCopied == totalBytes {
-				*lastUpdate = time.Now()
-				var pct float64
-				if totalBytes > 0 {
-					pct = float64(*bytesCopied) / float64(totalBytes)
-				} else {
-					pct = 1.0
-				}
-				select {
-				case ch <- sftpProgressMsg{
-					Message: fmt.Sprintf("Uploading %s: %s / %s", rootName, formatSize(*bytesCopied), formatSize(totalBytes)),
-					Percent: pct,
-				}:
-				default:
-				}
-			}
+			sendProgress(int64(n))
 		},
 	}
 
@@ -403,54 +533,30 @@ func uploadItemWithProgress(client *sftp.Client, localPath, remotePath string, b
 	return err
 }
 
-func downloadItemWithProgress(client *sftp.Client, remotePath, localPath string, bytesCopied *int64, lastUpdate *time.Time, totalBytes int64, ch chan sftpProgressMsg, rootName string) error {
-	info, err := client.Lstat(remotePath)
-	if err != nil {
+func downloadSingleTask(sshClient *ssh.Client, sftpClient *sftp.Client, task fileTransferTask, sendProgress func(int64)) error {
+	if task.IsSymlink {
+		_ = os.Remove(task.LocalPath)
+		err := os.Symlink(task.SymlinkTarget, task.LocalPath)
+		sendProgress(0)
 		return err
 	}
 
-	if info.Mode()&os.ModeSymlink != 0 {
-		target, err := client.ReadLink(remotePath)
-		if err != nil {
-			return err
+	localHash, err := getLocalSHA256(task.LocalPath)
+	if err == nil {
+		remoteHash, err := getRemoteSHA256(sshClient, task.RemotePath)
+		if err == nil && localHash == remoteHash {
+			sendProgress(task.Size)
+			return nil
 		}
-		_ = os.Remove(localPath)
-		return os.Symlink(target, localPath)
 	}
 
-	if info.IsDir() {
-		err = os.MkdirAll(localPath, 0755)
-		if err != nil {
-			return err
-		}
-
-		entries, err := client.ReadDir(remotePath)
-		if err != nil {
-			return err
-		}
-
-		for _, entry := range entries {
-			name := entry.Name()
-			if name == "." || name == ".." {
-				continue
-			}
-			subRemote := remoteJoin(remotePath, name)
-			subLocal := filepath.Join(localPath, name)
-			if err := downloadItemWithProgress(client, subRemote, subLocal, bytesCopied, lastUpdate, totalBytes, ch, rootName); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	// File download
-	src, err := client.Open(remotePath)
+	src, err := sftpClient.Open(task.RemotePath)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
 
-	dest, err := os.Create(localPath)
+	dest, err := os.Create(task.LocalPath)
 	if err != nil {
 		return err
 	}
@@ -459,28 +565,178 @@ func downloadItemWithProgress(client *sftp.Client, remotePath, localPath string,
 	pw := &progressWriter{
 		w: dest,
 		onProgress: func(n int) {
-			*bytesCopied += int64(n)
-			if time.Since(*lastUpdate) > 100*time.Millisecond || *bytesCopied == totalBytes {
-				*lastUpdate = time.Now()
-				var pct float64
-				if totalBytes > 0 {
-					pct = float64(*bytesCopied) / float64(totalBytes)
-				} else {
-					pct = 1.0
-				}
-				select {
-				case ch <- sftpProgressMsg{
-					Message: fmt.Sprintf("Downloading %s: %s / %s", rootName, formatSize(*bytesCopied), formatSize(totalBytes)),
-					Percent: pct,
-				}:
-				default:
-				}
-			}
+			sendProgress(int64(n))
 		},
 	}
 
 	_, err = io.Copy(pw, src)
 	return err
+}
+
+func uploadTasksConcurrent(sshClient *ssh.Client, sftpClient *sftp.Client, tasks []fileTransferTask, ch chan sftpProgressMsg, rootName string) error {
+	totalBytes := int64(0)
+	for _, task := range tasks {
+		totalBytes += task.Size
+	}
+
+	var bytesCopied int64
+	var lastUpdate time.Time = time.Now()
+	var updateMutex sync.Mutex
+
+	sendProgress := func(n int64) {
+		updateMutex.Lock()
+		bytesCopied += n
+		now := time.Now()
+		if now.Sub(lastUpdate) > 100*time.Millisecond || bytesCopied == totalBytes {
+			lastUpdate = now
+			var pct float64
+			if totalBytes > 0 {
+				pct = float64(bytesCopied) / float64(totalBytes)
+			} else {
+				pct = 1.0
+			}
+			updateMutex.Unlock()
+
+			select {
+			case ch <- sftpProgressMsg{
+				Message: fmt.Sprintf("Uploading %s: %s / %s", rootName, formatSize(bytesCopied), formatSize(totalBytes)),
+				Percent: pct,
+			}:
+			default:
+			}
+		} else {
+			updateMutex.Unlock()
+		}
+	}
+
+	sendProgress(0)
+
+	taskChan := make(chan fileTransferTask, len(tasks))
+	for _, task := range tasks {
+		taskChan <- task
+	}
+	close(taskChan)
+
+	var wg sync.WaitGroup
+	numWorkers := 8
+	if len(tasks) < numWorkers {
+		numWorkers = len(tasks)
+	}
+
+	var errs []error
+	var errMutex sync.Mutex
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range taskChan {
+				errMutex.Lock()
+				if len(errs) > 0 {
+					errMutex.Unlock()
+					continue
+				}
+				errMutex.Unlock()
+
+				err := uploadSingleTask(sshClient, sftpClient, task, sendProgress)
+				if err != nil {
+					errMutex.Lock()
+					errs = append(errs, err)
+					errMutex.Unlock()
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if len(errs) > 0 {
+		return errs[0]
+	}
+	return nil
+}
+
+func downloadTasksConcurrent(sshClient *ssh.Client, sftpClient *sftp.Client, tasks []fileTransferTask, ch chan sftpProgressMsg, rootName string) error {
+	totalBytes := int64(0)
+	for _, task := range tasks {
+		totalBytes += task.Size
+	}
+
+	var bytesCopied int64
+	var lastUpdate time.Time = time.Now()
+	var updateMutex sync.Mutex
+
+	sendProgress := func(n int64) {
+		updateMutex.Lock()
+		bytesCopied += n
+		now := time.Now()
+		if now.Sub(lastUpdate) > 100*time.Millisecond || bytesCopied == totalBytes {
+			lastUpdate = now
+			var pct float64
+			if totalBytes > 0 {
+				pct = float64(bytesCopied) / float64(totalBytes)
+			} else {
+				pct = 1.0
+			}
+			updateMutex.Unlock()
+
+			select {
+			case ch <- sftpProgressMsg{
+				Message: fmt.Sprintf("Downloading %s: %s / %s", rootName, formatSize(bytesCopied), formatSize(totalBytes)),
+				Percent: pct,
+			}:
+			default:
+			}
+		} else {
+			updateMutex.Unlock()
+		}
+	}
+
+	sendProgress(0)
+
+	taskChan := make(chan fileTransferTask, len(tasks))
+	for _, task := range tasks {
+		taskChan <- task
+	}
+	close(taskChan)
+
+	var wg sync.WaitGroup
+	numWorkers := 8
+	if len(tasks) < numWorkers {
+		numWorkers = len(tasks)
+	}
+
+	var errs []error
+	var errMutex sync.Mutex
+
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range taskChan {
+				errMutex.Lock()
+				if len(errs) > 0 {
+					errMutex.Unlock()
+					continue
+				}
+				errMutex.Unlock()
+
+				err := downloadSingleTask(sshClient, sftpClient, task, sendProgress)
+				if err != nil {
+					errMutex.Lock()
+					errs = append(errs, err)
+					errMutex.Unlock()
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if len(errs) > 0 {
+		return errs[0]
+	}
+	return nil
 }
 
 func connectSFTP(server Server, width, height int) tea.Cmd {
@@ -632,15 +888,32 @@ func (b *SFTPBrowser) startUpload(localPath, remotePath, filename string) tea.Cm
 	b.lastProgress = sftpProgressMsg{}
 
 	go func() {
-		totalBytes, err := countLocalFiles(localPath)
+		b.progressChan <- sftpProgressMsg{
+			Message: "Scanning local directory...",
+			Percent: 0,
+		}
+
+		tasks, err := discoverUploadTasks(b.sftpClient, localPath, remotePath)
 		if err != nil {
 			b.progressChan <- sftpProgressMsg{Done: true, Err: err}
 			return
 		}
 
-		var bytesCopied int64
-		var lastUpdate time.Time
-		err = uploadItemWithProgress(b.sftpClient, localPath, remotePath, &bytesCopied, &lastUpdate, totalBytes, b.progressChan, filename)
+		totalBytes := int64(0)
+		for _, t := range tasks {
+			totalBytes += t.Size
+		}
+
+		if len(tasks) == 0 {
+			b.progressChan <- sftpProgressMsg{
+				Done:    true,
+				Message: "No files to upload.",
+				Percent: 1.0,
+			}
+			return
+		}
+
+		err = uploadTasksConcurrent(b.sshClient, b.sftpClient, tasks, b.progressChan, filename)
 		if err != nil {
 			b.progressChan <- sftpProgressMsg{Done: true, Err: err}
 			return
@@ -661,15 +934,32 @@ func (b *SFTPBrowser) startDownload(remotePath, localPath, filename string) tea.
 	b.lastProgress = sftpProgressMsg{}
 
 	go func() {
-		totalBytes, err := countRemoteFiles(b.sftpClient, remotePath)
+		b.progressChan <- sftpProgressMsg{
+			Message: "Scanning remote directory...",
+			Percent: 0,
+		}
+
+		tasks, err := discoverDownloadTasks(b.sftpClient, remotePath, localPath)
 		if err != nil {
 			b.progressChan <- sftpProgressMsg{Done: true, Err: err}
 			return
 		}
 
-		var bytesCopied int64
-		var lastUpdate time.Time
-		err = downloadItemWithProgress(b.sftpClient, remotePath, localPath, &bytesCopied, &lastUpdate, totalBytes, b.progressChan, filename)
+		totalBytes := int64(0)
+		for _, t := range tasks {
+			totalBytes += t.Size
+		}
+
+		if len(tasks) == 0 {
+			b.progressChan <- sftpProgressMsg{
+				Done:    true,
+				Message: "No files to download.",
+				Percent: 1.0,
+			}
+			return
+		}
+
+		err = downloadTasksConcurrent(b.sshClient, b.sftpClient, tasks, b.progressChan, filename)
 		if err != nil {
 			b.progressChan <- sftpProgressMsg{Done: true, Err: err}
 			return

@@ -413,66 +413,6 @@ func (m MainModel) updateSFTPBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
-	case tea.MouseMsg:
-		if b.isBusy || b.deleteConfirm {
-			return m, nil
-		}
-
-		// Click to focus panels
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			availHeight := m.height - 8
-			if availHeight < 10 {
-				availHeight = 10
-			}
-			termHeight := availHeight * b.terminalHeightPct / 100
-			if termHeight < 5 {
-				termHeight = 5
-			}
-			if termHeight > availHeight-6 {
-				termHeight = availHeight - 6
-			}
-			panelHeight := availHeight - termHeight
-			if panelHeight < 6 {
-				panelHeight = 6
-			}
-
-			// File panels start around row 5 and have height panelHeight
-			terminalStartRow := 5 + panelHeight + 2
-			if msg.Y >= terminalStartRow {
-				b.activePanel = TerminalPanel
-			} else if msg.X < m.width/2 {
-				b.activePanel = LocalPanel
-			} else {
-				b.activePanel = RemotePanel
-			}
-			return m, nil
-		}
-
-		// Mouse scroll
-		if msg.Button == tea.MouseButtonWheelUp {
-			if b.activePanel == LocalPanel {
-				if b.localIdx > 0 {
-					b.localIdx--
-				}
-			} else if b.activePanel == RemotePanel {
-				if b.remoteIdx > 0 {
-					b.remoteIdx--
-				}
-			}
-			return m, nil
-		} else if msg.Button == tea.MouseButtonWheelDown {
-			if b.activePanel == LocalPanel {
-				if b.localIdx < len(b.localItems)-1 {
-					b.localIdx++
-				}
-			} else if b.activePanel == RemotePanel {
-				if b.remoteIdx < len(b.remoteItems)-1 {
-					b.remoteIdx++
-				}
-			}
-			return m, nil
-		}
-
 	case tea.KeyMsg:
 		// Clear transfer status notifications on keypress
 		if !b.isBusy && b.activePanel != TerminalPanel {
@@ -1235,7 +1175,7 @@ func main() {
 		height:      24,
 	}
 
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Alas, terminal application failed: %v\n", err)
 		os.Exit(1)

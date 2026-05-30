@@ -88,3 +88,33 @@ func TestCountLocalFiles(t *testing.T) {
 		t.Errorf("countLocalFiles = %d; want %d", totalSize, expectedSize)
 	}
 }
+
+func TestDiscoverUploadTasks(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "sshmanager_upload_test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	file1Path := filepath.Join(tempDir, "file1.txt")
+	if err := os.WriteFile(file1Path, []byte("0123456789"), 0644); err != nil {
+		t.Fatalf("failed to write file1: %v", err)
+	}
+
+	tasks, err := discoverUploadTasks(nil, file1Path, "/remote/file1.txt")
+	if err != nil {
+		t.Fatalf("discoverUploadTasks failed: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	if tasks[0].Size != 10 {
+		t.Errorf("expected size 10, got %d", tasks[0].Size)
+	}
+	if tasks[0].LocalPath != file1Path {
+		t.Errorf("expected local path %q, got %q", file1Path, tasks[0].LocalPath)
+	}
+	if tasks[0].RemotePath != "/remote/file1.txt" {
+		t.Errorf("expected remote path %q, got %q", "/remote/file1.txt", tasks[0].RemotePath)
+	}
+}
