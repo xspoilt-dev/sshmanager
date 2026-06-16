@@ -1,8 +1,5 @@
 # ⚡ SSH & SFTP Manager TUI ⚡
 
-[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=for-the-badge&logo=go)](https://golang.org)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-blueviolet?style=for-the-badge)](https://github.com/xspoilt-dev/sshmanager)
-[![Charm Framework](https://img.shields.io/badge/Built%20With-Charm%20TUI-F25287?style=for-the-badge)](https://charm.sh)
 
 ![SSH & SFTP Manager TUI Demo](demo.jpeg)
 
