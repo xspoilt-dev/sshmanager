@@ -326,6 +326,7 @@ type fileTransferTask struct {
 	LocalPath     string
 	RemotePath    string
 	Size          int64
+	IsDir         bool
 	IsSymlink     bool
 	SymlinkTarget string
 }
@@ -335,7 +336,10 @@ func discoverUploadTasks(client *sftp.Client, localPath, remotePath string) ([]f
 	if err != nil {
 		return nil, err
 	}
+	return discoverUploadTasksInternal(localPath, remotePath, info)
+}
 
+func discoverUploadTasksInternal(localPath, remotePath string, info os.FileInfo) ([]fileTransferTask, error) {
 	if info.Mode()&os.ModeSymlink != 0 {
 		target, err := os.Readlink(localPath)
 		if err != nil {
@@ -351,29 +355,25 @@ func discoverUploadTasks(client *sftp.Client, localPath, remotePath string) ([]f
 	}
 
 	if info.IsDir() {
-		if stat, err := client.Stat(remotePath); err == nil {
-			if !stat.IsDir() {
-				return nil, fmt.Errorf("remote path %s exists but is not a directory", remotePath)
-			}
-		} else {
-			err = client.Mkdir(remotePath)
-			if err != nil {
-				if !strings.Contains(err.Error(), "already exists") && !strings.Contains(err.Error(), "Failure") {
-					return nil, err
-				}
-			}
-		}
+		tasks := []fileTransferTask{{
+			LocalPath:  localPath,
+			RemotePath: remotePath,
+			IsDir:      true,
+		}}
 
 		entries, err := os.ReadDir(localPath)
 		if err != nil {
 			return nil, err
 		}
 
-		var tasks []fileTransferTask
 		for _, entry := range entries {
 			subLocal := filepath.Join(localPath, entry.Name())
 			subRemote := remoteJoin(remotePath, entry.Name())
-			subTasks, err := discoverUploadTasks(client, subLocal, subRemote)
+			subInfo, err := entry.Info()
+			if err != nil {
+				return nil, err
+			}
+			subTasks, err := discoverUploadTasksInternal(subLocal, subRemote, subInfo)
 			if err != nil {
 				return nil, err
 			}
@@ -394,7 +394,10 @@ func discoverDownloadTasks(client *sftp.Client, remotePath, localPath string) ([
 	if err != nil {
 		return nil, err
 	}
+	return discoverDownloadTasksInternal(client, remotePath, localPath, info)
+}
 
+func discoverDownloadTasksInternal(client *sftp.Client, remotePath, localPath string, info os.FileInfo) ([]fileTransferTask, error) {
 	if info.Mode()&os.ModeSymlink != 0 {
 		target, err := client.ReadLink(remotePath)
 		if err != nil {
@@ -410,17 +413,17 @@ func discoverDownloadTasks(client *sftp.Client, remotePath, localPath string) ([
 	}
 
 	if info.IsDir() {
-		err = os.MkdirAll(localPath, 0755)
-		if err != nil {
-			return nil, err
-		}
+		tasks := []fileTransferTask{{
+			LocalPath:  localPath,
+			RemotePath: remotePath,
+			IsDir:      true,
+		}}
 
 		entries, err := client.ReadDir(remotePath)
 		if err != nil {
 			return nil, err
 		}
 
-		var tasks []fileTransferTask
 		for _, entry := range entries {
 			name := entry.Name()
 			if name == "." || name == ".." {
@@ -428,7 +431,7 @@ func discoverDownloadTasks(client *sftp.Client, remotePath, localPath string) ([
 			}
 			subRemote := remoteJoin(remotePath, name)
 			subLocal := filepath.Join(localPath, name)
-			subTasks, err := discoverDownloadTasks(client, subRemote, subLocal)
+			subTasks, err := discoverDownloadTasksInternal(client, subRemote, subLocal, entry)
 			if err != nil {
 				return nil, err
 			}
@@ -501,12 +504,35 @@ func uploadSingleTask(sshClient *ssh.Client, sftpClient *sftp.Client, task fileT
 		return err
 	}
 
-	localHash, err := getLocalSHA256(task.LocalPath)
-	if err == nil {
-		remoteHash, err := getRemoteSHA256(sshClient, task.RemotePath)
-		if err == nil && localHash == remoteHash {
+	localStat, err := os.Stat(task.LocalPath)
+	if err != nil {
+		return err
+	}
+
+	// 1. Fast check: see if remote file exists and has the same size
+	remoteStat, err := sftpClient.Stat(task.RemotePath)
+	if err == nil && remoteStat.Size() == task.Size {
+		// 2. Check modtime (within 1 second)
+		timeDiff := remoteStat.ModTime().Sub(localStat.ModTime())
+		if timeDiff < 0 {
+			timeDiff = -timeDiff
+		}
+		if timeDiff <= time.Second {
+			// Size and modtime match, skip transfer
 			sendProgress(task.Size)
 			return nil
+		}
+
+		// 3. Fallback: check SHA256 if modtimes differ but sizes match
+		localHash, errHash := getLocalSHA256(task.LocalPath)
+		if errHash == nil {
+			remoteHash, errHash := getRemoteSHA256(sshClient, task.RemotePath)
+			if errHash == nil && localHash == remoteHash {
+				// Hashes match, update remote modtime to match local and skip transfer
+				_ = sftpClient.Chtimes(task.RemotePath, localStat.ModTime(), localStat.ModTime())
+				sendProgress(task.Size)
+				return nil
+			}
 		}
 	}
 
@@ -529,8 +555,13 @@ func uploadSingleTask(sshClient *ssh.Client, sftpClient *sftp.Client, task fileT
 		},
 	}
 
-	_, err = io.Copy(dest, pr)
-	return err
+	if _, err = io.Copy(dest, pr); err != nil {
+		return err
+	}
+
+	// Preserve modification time
+	_ = sftpClient.Chtimes(task.RemotePath, localStat.ModTime(), localStat.ModTime())
+	return nil
 }
 
 func downloadSingleTask(sshClient *ssh.Client, sftpClient *sftp.Client, task fileTransferTask, sendProgress func(int64)) error {
@@ -541,12 +572,35 @@ func downloadSingleTask(sshClient *ssh.Client, sftpClient *sftp.Client, task fil
 		return err
 	}
 
-	localHash, err := getLocalSHA256(task.LocalPath)
-	if err == nil {
-		remoteHash, err := getRemoteSHA256(sshClient, task.RemotePath)
-		if err == nil && localHash == remoteHash {
+	remoteStat, err := sftpClient.Stat(task.RemotePath)
+	if err != nil {
+		return err
+	}
+
+	// 1. Fast check: see if local file exists and has the same size
+	localStat, err := os.Stat(task.LocalPath)
+	if err == nil && localStat.Size() == task.Size {
+		// 2. Check modtime (within 1 second)
+		timeDiff := localStat.ModTime().Sub(remoteStat.ModTime())
+		if timeDiff < 0 {
+			timeDiff = -timeDiff
+		}
+		if timeDiff <= time.Second {
+			// Size and modtime match, skip transfer
 			sendProgress(task.Size)
 			return nil
+		}
+
+		// 3. Fallback: check SHA256 if modtimes differ but sizes match
+		localHash, errHash := getLocalSHA256(task.LocalPath)
+		if errHash == nil {
+			remoteHash, errHash := getRemoteSHA256(sshClient, task.RemotePath)
+			if errHash == nil && localHash == remoteHash {
+				// Hashes match, update local modtime to match remote and skip transfer
+				_ = os.Chtimes(task.LocalPath, remoteStat.ModTime(), remoteStat.ModTime())
+				sendProgress(task.Size)
+				return nil
+			}
 		}
 	}
 
@@ -569,13 +623,44 @@ func downloadSingleTask(sshClient *ssh.Client, sftpClient *sftp.Client, task fil
 		},
 	}
 
-	_, err = io.Copy(pw, src)
-	return err
+	if _, err = io.Copy(pw, src); err != nil {
+		return err
+	}
+
+	// Preserve modification time
+	_ = os.Chtimes(task.LocalPath, remoteStat.ModTime(), remoteStat.ModTime())
+	return nil
 }
 
 func uploadTasksConcurrent(sshClient *ssh.Client, sftpClient *sftp.Client, tasks []fileTransferTask, ch chan sftpProgressMsg, rootName string) error {
-	totalBytes := int64(0)
+	// 1. Separate directory tasks and file/symlink tasks
+	var dirTasks []fileTransferTask
+	var fileTasks []fileTransferTask
 	for _, task := range tasks {
+		if task.IsDir {
+			dirTasks = append(dirTasks, task)
+		} else {
+			fileTasks = append(fileTasks, task)
+		}
+	}
+
+	// 2. Process directory creations first
+	sort.Slice(dirTasks, func(i, j int) bool {
+		return len(dirTasks[i].RemotePath) < len(dirTasks[j].RemotePath)
+	})
+
+	for _, task := range dirTasks {
+		err := sftpClient.Mkdir(task.RemotePath)
+		if err != nil {
+			// Ignore if it already exists
+			if !strings.Contains(err.Error(), "already exists") && !strings.Contains(err.Error(), "Failure") {
+				// Some servers might fail or return permission/etc, but we can try to proceed
+			}
+		}
+	}
+
+	totalBytes := int64(0)
+	for _, task := range fileTasks {
 		totalBytes += task.Size
 	}
 
@@ -611,16 +696,21 @@ func uploadTasksConcurrent(sshClient *ssh.Client, sftpClient *sftp.Client, tasks
 
 	sendProgress(0)
 
-	taskChan := make(chan fileTransferTask, len(tasks))
-	for _, task := range tasks {
+	// If there are no file tasks, we are done!
+	if len(fileTasks) == 0 {
+		return nil
+	}
+
+	taskChan := make(chan fileTransferTask, len(fileTasks))
+	for _, task := range fileTasks {
 		taskChan <- task
 	}
 	close(taskChan)
 
 	var wg sync.WaitGroup
 	numWorkers := 8
-	if len(tasks) < numWorkers {
-		numWorkers = len(tasks)
+	if len(fileTasks) < numWorkers {
+		numWorkers = len(fileTasks)
 	}
 
 	var errs []error
@@ -657,8 +747,31 @@ func uploadTasksConcurrent(sshClient *ssh.Client, sftpClient *sftp.Client, tasks
 }
 
 func downloadTasksConcurrent(sshClient *ssh.Client, sftpClient *sftp.Client, tasks []fileTransferTask, ch chan sftpProgressMsg, rootName string) error {
-	totalBytes := int64(0)
+	// 1. Separate directory tasks and file/symlink tasks
+	var dirTasks []fileTransferTask
+	var fileTasks []fileTransferTask
 	for _, task := range tasks {
+		if task.IsDir {
+			dirTasks = append(dirTasks, task)
+		} else {
+			fileTasks = append(fileTasks, task)
+		}
+	}
+
+	// 2. Process directory creations first locally
+	sort.Slice(dirTasks, func(i, j int) bool {
+		return len(dirTasks[i].LocalPath) < len(dirTasks[j].LocalPath)
+	})
+
+	for _, task := range dirTasks {
+		err := os.MkdirAll(task.LocalPath, 0755)
+		if err != nil {
+			return err
+		}
+	}
+
+	totalBytes := int64(0)
+	for _, task := range fileTasks {
 		totalBytes += task.Size
 	}
 
@@ -694,16 +807,21 @@ func downloadTasksConcurrent(sshClient *ssh.Client, sftpClient *sftp.Client, tas
 
 	sendProgress(0)
 
-	taskChan := make(chan fileTransferTask, len(tasks))
-	for _, task := range tasks {
+	// If there are no file tasks, we are done!
+	if len(fileTasks) == 0 {
+		return nil
+	}
+
+	taskChan := make(chan fileTransferTask, len(fileTasks))
+	for _, task := range fileTasks {
 		taskChan <- task
 	}
 	close(taskChan)
 
 	var wg sync.WaitGroup
 	numWorkers := 8
-	if len(tasks) < numWorkers {
-		numWorkers = len(tasks)
+	if len(fileTasks) < numWorkers {
+		numWorkers = len(fileTasks)
 	}
 
 	var errs []error

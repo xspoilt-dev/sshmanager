@@ -118,3 +118,54 @@ func TestDiscoverUploadTasks(t *testing.T) {
 		t.Errorf("expected remote path %q, got %q", "/remote/file1.txt", tasks[0].RemotePath)
 	}
 }
+
+func TestDiscoverUploadTasksDirectory(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "sshmanager_upload_dir_test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Create a sub-directory and a file in it
+	subDir := filepath.Join(tempDir, "subdir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatalf("failed to create subdir: %v", err)
+	}
+	file1Path := filepath.Join(subDir, "file1.txt")
+	if err := os.WriteFile(file1Path, []byte("hello"), 0644); err != nil {
+		t.Fatalf("failed to write file1: %v", err)
+	}
+
+	tasks, err := discoverUploadTasks(nil, tempDir, "/remote")
+	if err != nil {
+		t.Fatalf("discoverUploadTasks failed: %v", err)
+	}
+
+	// We expect 3 tasks: the root directory, the subdirectory, and the file
+	if len(tasks) != 3 {
+		t.Fatalf("expected 3 tasks, got %d", len(tasks))
+	}
+
+	var rootTask, subdirTask, fileTask *fileTransferTask
+	for i := range tasks {
+		t := &tasks[i]
+		if t.LocalPath == tempDir {
+			rootTask = t
+		} else if t.LocalPath == subDir {
+			subdirTask = t
+		} else if t.LocalPath == file1Path {
+			fileTask = t
+		}
+	}
+
+	if rootTask == nil || !rootTask.IsDir {
+		t.Errorf("expected root directory task to be IsDir")
+	}
+	if subdirTask == nil || !subdirTask.IsDir {
+		t.Errorf("expected subdir task to be IsDir")
+	}
+	if fileTask == nil || fileTask.IsDir || fileTask.Size != 5 {
+		t.Errorf("expected file task to not be IsDir and have size 5")
+	}
+}
+
