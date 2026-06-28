@@ -1,4 +1,4 @@
-package main
+package tui
 
 import (
 	"os"
@@ -168,4 +168,3 @@ func TestDiscoverUploadTasksDirectory(t *testing.T) {
 		t.Errorf("expected file task to not be IsDir and have size 5")
 	}
 }
-

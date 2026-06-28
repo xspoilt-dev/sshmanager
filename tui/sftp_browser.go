@@ -1,4 +1,4 @@
-package main
+package tui
 
 import (
 	"crypto/sha256"
@@ -18,6 +18,9 @@ import (
 	"github.com/charmbracelet/x/vt"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+
+	"sshmanager/config"
+	sshcmd "sshmanager/ssh"
 )
 
 type Panel int
@@ -35,7 +38,7 @@ type FileItem struct {
 }
 
 type SFTPBrowser struct {
-	Server      Server
+	Server      config.Server
 	sshClient   *ssh.Client
 	sftpClient  *sftp.Client
 	activePanel Panel
@@ -857,9 +860,9 @@ func downloadTasksConcurrent(sshClient *ssh.Client, sftpClient *sftp.Client, tas
 	return nil
 }
 
-func connectSFTP(server Server, width, height int) tea.Cmd {
+func connectSFTP(server config.Server, width, height int) tea.Cmd {
 	return func() tea.Msg {
-		sshClient, err := GetSSHClient(server)
+		sshClient, err := sshcmd.GetSSHClient(server)
 		if err != nil {
 			return sftpErrorMsg{err: fmt.Errorf("SSH connection failed: %w", err)}
 		}
@@ -1094,7 +1097,7 @@ func (b *SFTPBrowser) startDownload(remotePath, localPath, filename string) tea.
 }
 
 // Initialise the browser
-func NewSFTPBrowser(server Server) *SFTPBrowser {
+func NewSFTPBrowser(server config.Server) *SFTPBrowser {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))

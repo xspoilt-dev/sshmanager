@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"crypto/aes"
@@ -14,12 +14,14 @@ import (
 )
 
 type Server struct {
-	Alias       string `json:"alias"`
-	Host        string `json:"host"`        // Encrypted base64
-	User        string `json:"user"`        // Encrypted base64
-	Password    string `json:"password"`    // Encrypted base64
-	Port        int    `json:"port"`
-	ProjectPath string `json:"project_path"` // Plaintext local directory
+	Alias          string `json:"alias"`
+	Host           string `json:"host"`             // Encrypted base64
+	User           string `json:"user"`             // Encrypted base64
+	Password       string `json:"password"`         // Encrypted base64
+	Port           int    `json:"port"`
+	ProjectPath    string `json:"project_path"`     // Plaintext local directory
+	PrivateKeyPath string `json:"private_key_path"` // Encrypted base64
+	UseSSHAgent    bool   `json:"use_ssh_agent"`
 }
 
 const (
@@ -28,7 +30,12 @@ const (
 	keyFileName    = "secret.key"
 )
 
+var ConfigDirOverride string
+
 func getConfigDir() (string, error) {
+	if ConfigDirOverride != "" {
+		return ConfigDirOverride, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -73,8 +80,11 @@ func getOrGenerateKey() ([]byte, error) {
 	return key, nil
 }
 
-// encrypt encrypts plaintext using AES-256-GCM.
-func encrypt(plaintext string, key []byte) (string, error) {
+// Encrypt encrypts plaintext using AES-256-GCM (exported for testing).
+func Encrypt(plaintext string, key []byte) (string, error) {
+	if len(key) != 32 {
+		return "", errors.New("invalid key size, expected 32 bytes")
+	}
 	if plaintext == "" {
 		return "", nil
 	}
@@ -98,8 +108,11 @@ func encrypt(plaintext string, key []byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// decrypt decrypts AES-256-GCM ciphertext.
-func decrypt(ciphertextBase64 string, key []byte) (string, error) {
+// Decrypt decrypts AES-256-GCM ciphertext (exported for testing).
+func Decrypt(ciphertextBase64 string, key []byte) (string, error) {
+	if len(key) != 32 {
+		return "", errors.New("invalid key size, expected 32 bytes")
+	}
 	if ciphertextBase64 == "" {
 		return "", nil
 	}
@@ -162,26 +175,32 @@ func LoadServers() ([]Server, error) {
 
 	servers := make([]Server, len(rawServers))
 	for i, s := range rawServers {
-		decHost, err := decrypt(s.Host, key)
+		decHost, err := Decrypt(s.Host, key)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt host for %s: %w", s.Alias, err)
 		}
-		decUser, err := decrypt(s.User, key)
+		decUser, err := Decrypt(s.User, key)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt user for %s: %w", s.Alias, err)
 		}
-		decPass, err := decrypt(s.Password, key)
+		decPass, err := Decrypt(s.Password, key)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decrypt password for %s: %w", s.Alias, err)
 		}
+		decKeyPath, err := Decrypt(s.PrivateKeyPath, key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt private key path for %s: %w", s.Alias, err)
+		}
 
 		servers[i] = Server{
-			Alias:       s.Alias,
-			Host:        decHost,
-			User:        decUser,
-			Password:    decPass,
-			Port:        s.Port,
-			ProjectPath: s.ProjectPath,
+			Alias:          s.Alias,
+			Host:           decHost,
+			User:           decUser,
+			Password:       decPass,
+			Port:           s.Port,
+			ProjectPath:    s.ProjectPath,
+			PrivateKeyPath: decKeyPath,
+			UseSSHAgent:    s.UseSSHAgent,
 		}
 	}
 
@@ -206,26 +225,32 @@ func SaveServers(servers []Server) error {
 
 	encryptedServers := make([]Server, len(servers))
 	for i, s := range servers {
-		encHost, err := encrypt(s.Host, key)
+		encHost, err := Encrypt(s.Host, key)
 		if err != nil {
 			return err
 		}
-		encUser, err := encrypt(s.User, key)
+		encUser, err := Encrypt(s.User, key)
 		if err != nil {
 			return err
 		}
-		encPass, err := encrypt(s.Password, key)
+		encPass, err := Encrypt(s.Password, key)
+		if err != nil {
+			return err
+		}
+		encKeyPath, err := Encrypt(s.PrivateKeyPath, key)
 		if err != nil {
 			return err
 		}
 
 		encryptedServers[i] = Server{
-			Alias:       s.Alias,
-			Host:        encHost,
-			User:        encUser,
-			Password:    encPass,
-			Port:        s.Port,
-			ProjectPath: s.ProjectPath,
+			Alias:          s.Alias,
+			Host:           encHost,
+			User:           encUser,
+			Password:       encPass,
+			Port:           s.Port,
+			ProjectPath:    s.ProjectPath,
+			PrivateKeyPath: encKeyPath,
+			UseSSHAgent:    s.UseSSHAgent,
 		}
 	}
 
@@ -235,5 +260,13 @@ func SaveServers(servers []Server) error {
 	}
 
 	configPath := filepath.Join(dir, configFileName)
-	return os.WriteFile(configPath, data, 0600)
+	tempPath := configPath + ".tmp"
+	if err := os.WriteFile(tempPath, data, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, configPath); err != nil {
+		_ = os.Remove(tempPath)
+		return err
+	}
+	return nil
 }
