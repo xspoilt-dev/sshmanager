@@ -141,7 +141,7 @@ Toggle active panel focus between the **File Browser (Top)** and the **SSH Termi
 
 ## 🤝 Contributing
 
-Contributions, bug reports, and pull requests are welcome!
+Contributions, bug reports, and pull requests are welcome! 
 1. Fork the Project.
 2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`).
 3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`).
@@ -149,3 +149,4 @@ Contributions, bug reports, and pull requests are welcome!
 5. Open a Pull Request.
 
 ---
+
